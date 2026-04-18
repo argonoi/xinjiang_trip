@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   PieChart,
   Pie,
@@ -7,13 +7,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-
-const STORAGE_KEY = "shared_trip_wallet_groups";
-const LEGACY_STORAGE_KEYS = [
-  "shared_trip_wallet_groups",
-  "shared_trip_wallet_groups_v2",
-  "shared_trip_wallet_groups_mobile_v1",
-];
+import { supabase } from "./supabase";
 
 const CATEGORY_OPTIONS = ["机票", "酒店", "吃饭", "娱乐", "其他"];
 const CHART_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4"];
@@ -21,7 +15,10 @@ const CHART_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4"];
 function App() {
   const [groups, setGroups] = useState([]);
   const [activeGroupId, setActiveGroupId] = useState(null);
-  const [hasLoadedStorage, setHasLoadedStorage] = useState(false);
+  const [selectedPersonId, setSelectedPersonId] = useState(null);
+
+  const [loading, setLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const [groupName, setGroupName] = useState("");
   const [groupSize, setGroupSize] = useState(9);
@@ -38,65 +35,150 @@ function App() {
   const [expenseParticipantIds, setExpenseParticipantIds] = useState([]);
   const [expenseNote, setExpenseNote] = useState("");
 
-  const [selectedPersonId, setSelectedPersonId] = useState(null);
-
-  useEffect(() => {
-    try {
-      let loadedGroups = [];
-
-      for (const key of LEGACY_STORAGE_KEYS) {
-        const raw = localStorage.getItem(key);
-        if (!raw) continue;
-
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.length >= 0) {
-            loadedGroups = normalizeGroups(parsed);
-            if (loadedGroups.length > 0 || raw === "[]") {
-              break;
-            }
-          }
-        } catch (error) {
-          console.error(`Failed to parse storage key ${key}:`, error);
-        }
-      }
-
-      setGroups(loadedGroups);
-
-      if (loadedGroups.length > 0) {
-        setActiveGroupId(loadedGroups[0].id);
-        setSelectedPersonId(loadedGroups[0].people?.[0]?.id ?? null);
-      }
-    } finally {
-      setHasLoadedStorage(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedStorage) return;
-
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(groups));
-  }, [groups, hasLoadedStorage]);
-
-  const activeGroup = useMemo(
-    () => groups.find((group) => group.id === activeGroupId) || null,
-    [groups, activeGroupId]
-  );
+  const activeGroup =
+    groups.find((group) => group.id === activeGroupId) || null;
 
   const people = activeGroup?.people || [];
   const deposits = activeGroup?.deposits || [];
   const expenses = activeGroup?.expenses || [];
   const isAdminMode = Boolean(activeGroup?.isAdminMode);
 
-  function updateActiveGroup(updater) {
-    if (!activeGroupId) return;
+  const loadAllData = useCallback(async () => {
+    setErrorMessage("");
 
-    setGroups((prev) =>
-      prev.map((group) =>
-        group.id === activeGroupId ? normalizeGroup(updater(group)) : group
+    const { data: groupRows, error: groupsError } = await supabase
+      .from("groups")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (groupsError) {
+      console.error(groupsError);
+      setErrorMessage(groupsError.message || "Failed to load groups.");
+      setLoading(false);
+      return;
+    }
+
+    const groupIds = (groupRows || []).map((group) => group.id);
+
+    let peopleRows = [];
+    let recordRows = [];
+
+    if (groupIds.length > 0) {
+      const { data: fetchedPeople, error: peopleError } = await supabase
+        .from("people")
+        .select("*")
+        .in("group_id", groupIds)
+        .order("sort_order", { ascending: true });
+
+      if (peopleError) {
+        console.error(peopleError);
+        setErrorMessage(peopleError.message || "Failed to load people.");
+        setLoading(false);
+        return;
+      }
+
+      const { data: fetchedRecords, error: recordsError } = await supabase
+        .from("records")
+        .select("*")
+        .in("group_id", groupIds)
+        .order("created_at", { ascending: false });
+
+      if (recordsError) {
+        console.error(recordsError);
+        setErrorMessage(recordsError.message || "Failed to load records.");
+        setLoading(false);
+        return;
+      }
+
+      peopleRows = fetchedPeople || [];
+      recordRows = fetchedRecords || [];
+    }
+
+    setGroups((prevGroups) => {
+      const adminMap = new Map(
+        prevGroups.map((group) => [group.id, Boolean(group.isAdminMode)])
+      );
+
+      return (groupRows || []).map((group) => {
+        const groupPeople = peopleRows
+          .filter((person) => person.group_id === group.id)
+          .sort((a, b) => a.sort_order - b.sort_order);
+
+        const groupRecords = recordRows
+          .filter((record) => record.group_id === group.id)
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+        return {
+          ...group,
+          isAdminMode: adminMap.get(group.id) || false,
+          people: groupPeople,
+          deposits: groupRecords
+            .filter((record) => record.type === "deposit")
+            .map((record) => ({
+              ...record,
+              personId: record.participant_ids?.[0] || null,
+            })),
+          expenses: groupRecords
+            .filter((record) => record.type === "expense")
+            .map((record) => ({
+              ...record,
+              participantIds: record.participant_ids || [],
+            })),
+        };
+      });
+    });
+
+    setActiveGroupId((prev) => {
+      if (!groupRows || groupRows.length === 0) return null;
+      return groupRows.some((group) => group.id === prev)
+        ? prev
+        : groupRows[0].id;
+    });
+
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadAllData();
+
+    const channel = supabase
+      .channel("shared-trip-wallet-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "groups" },
+        () => loadAllData()
       )
-    );
-  }
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "people" },
+        () => loadAllData()
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "records" },
+        () => loadAllData()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [loadAllData]);
+
+  useEffect(() => {
+    if (!activeGroup) {
+      setSelectedPersonId(null);
+      return;
+    }
+
+    const hasSelected =
+      selectedPersonId &&
+      activeGroup.people.some((person) => person.id === selectedPersonId);
+
+    if (!hasSelected) {
+      setSelectedPersonId(activeGroup.people[0]?.id || null);
+    }
+  }, [activeGroup, selectedPersonId]);
 
   function resetCreateForm() {
     setGroupName("");
@@ -119,95 +201,84 @@ function App() {
 
   function handleNameChange(index, value) {
     setNameInputs((prev) => {
-      const updated = [...prev];
-      updated[index] = value;
-      return updated;
+      const next = [...prev];
+      next[index] = value;
+      return next;
     });
-  }
-
-  function handleCreateGroup() {
-    const size = Math.max(1, Number(groupSize) || 1);
-
-    const createdPeople = Array.from({ length: size }, (_, index) => ({
-      id: createId(),
-      name: nameInputs[index]?.trim() || `Person ${index + 1}`,
-    }));
-
-    const newGroup = normalizeGroup({
-      id: createId(),
-      name: groupName.trim() || `Trip ${groups.length + 1}`,
-      adminPassword: groupPassword.trim(),
-      isAdminMode: false,
-      people: createdPeople,
-      deposits: [],
-      expenses: [],
-      createdAt: new Date().toISOString(),
-    });
-
-    setGroups((prev) => [newGroup, ...prev]);
-    setActiveGroupId(newGroup.id);
-    setSelectedPersonId(newGroup.people[0]?.id ?? null);
-
-    setDepositAmount("");
-    setExpenseAmount("");
-    setExpenseNote("");
-    setDepositPersonIds([]);
-    setExpenseParticipantIds([]);
-    setAdminPasswordInput("");
-    resetCreateForm();
   }
 
   function handleOpenGroup(groupId) {
-    const target = groups.find((group) => group.id === groupId);
-    if (!target) return;
+    const targetGroup = groups.find((group) => group.id === groupId);
+    if (!targetGroup) return;
 
     setActiveGroupId(groupId);
-    setSelectedPersonId(target.people?.[0]?.id ?? null);
+    setSelectedPersonId(targetGroup.people?.[0]?.id || null);
+    setAdminPasswordInput("");
+    setDepositPersonIds([]);
+    setExpenseParticipantIds([]);
+  }
 
+  async function handleCreateGroup() {
+    const size = Math.max(1, Number(groupSize) || 1);
+
+    const createdPeople = Array.from({ length: size }, (_, index) => ({
+      name: nameInputs[index]?.trim() || `Person ${index + 1}`,
+      sort_order: index,
+    }));
+
+    const { data: createdGroup, error: groupError } = await supabase
+      .from("groups")
+      .insert([
+        {
+          name: groupName.trim() || `Trip ${groups.length + 1}`,
+          admin_password: groupPassword.trim(),
+        },
+      ])
+      .select()
+      .single();
+
+    if (groupError) {
+      console.error(groupError);
+      window.alert("创建 group 失败。");
+      return;
+    }
+
+    const { error: peopleError } = await supabase.from("people").insert(
+      createdPeople.map((person) => ({
+        ...person,
+        group_id: createdGroup.id,
+      }))
+    );
+
+    if (peopleError) {
+      console.error(peopleError);
+      window.alert("创建成员失败。");
+      return;
+    }
+
+    resetCreateForm();
+    setAdminPasswordInput("");
     setDepositAmount("");
     setExpenseAmount("");
     setExpenseNote("");
     setDepositPersonIds([]);
     setExpenseParticipantIds([]);
-    setAdminPasswordInput("");
-  }
 
-  function handleDeleteGroup(groupId) {
-    const target = groups.find((group) => group.id === groupId);
-    if (!target) return;
-
-    if (activeGroupId !== groupId || !isAdminMode) {
-      window.alert("Only Admin Mode of the currently opened group can delete it.");
-      return;
-    }
-
-    const confirmed = window.confirm(`确定要删除 group “${target.name}” 吗？`);
-    if (!confirmed) return;
-
-    const remaining = groups.filter((group) => group.id !== groupId);
-    setGroups(remaining);
-
-    if (remaining.length > 0) {
-      setActiveGroupId(remaining[0].id);
-      setSelectedPersonId(remaining[0].people?.[0]?.id ?? null);
-    } else {
-      setActiveGroupId(null);
-      setSelectedPersonId(null);
-    }
-
-    setDepositPersonIds([]);
-    setExpenseParticipantIds([]);
-    setAdminPasswordInput("");
+    await loadAllData();
+    setActiveGroupId(createdGroup.id);
   }
 
   function handleEnterAdminMode() {
     if (!activeGroup) return;
 
-    if ((activeGroup.adminPassword || "") === adminPasswordInput) {
-      updateActiveGroup((group) => ({
-        ...group,
-        isAdminMode: true,
-      }));
+    if ((activeGroup.admin_password || "") === adminPasswordInput) {
+      setGroups((prev) =>
+        prev.map((group) =>
+          group.id === activeGroup.id
+            ? { ...group, isAdminMode: true }
+            : { ...group, isAdminMode: false }
+        )
+      );
       setAdminPasswordInput("");
     } else {
       window.alert("密码不对。");
@@ -215,10 +286,13 @@ function App() {
   }
 
   function handleExitAdminMode() {
-    updateActiveGroup((group) => ({
-      ...group,
-      isAdminMode: false,
-    }));
+    if (!activeGroup) return;
+
+    setGroups((prev) =>
+      prev.map((group) =>
+        group.id === activeGroup.id ? { ...group, isAdminMode: false } : group
+      )
+    );
   }
 
   function toggleSelection(currentIds, setter, id) {
@@ -243,14 +317,14 @@ function App() {
     setExpenseParticipantIds([]);
   }
 
-  function handleAddDeposit() {
+  async function handleAddDeposit() {
     if (!activeGroup || !isAdminMode) {
       window.alert("Please enter Admin Mode first.");
       return;
     }
 
     const amount = Number(depositAmount);
-    if (amount <= 0) {
+    if (!(amount > 0)) {
       window.alert("请输入正确的 deposit 金额。");
       return;
     }
@@ -260,31 +334,36 @@ function App() {
       return;
     }
 
-    const newDeposits = depositPersonIds.map((personId) => ({
-      id: createId(),
+    const rows = depositPersonIds.map((personId) => ({
+      group_id: activeGroup.id,
       type: "deposit",
-      personId,
+      category: null,
       amount,
-      createdAt: new Date().toISOString(),
+      participant_ids: [personId],
+      note: "",
     }));
 
-    updateActiveGroup((group) => ({
-      ...group,
-      deposits: [...group.deposits, ...newDeposits],
-    }));
+    const { error } = await supabase.from("records").insert(rows);
 
+    if (error) {
+      console.error(error);
+      window.alert("新增 deposit 失败。");
+      return;
+    }
+
+    await loadAllData();
     setDepositAmount("");
     setDepositPersonIds([]);
   }
 
-  function handleAddExpense() {
+  async function handleAddExpense() {
     if (!activeGroup || !isAdminMode) {
       window.alert("Please enter Admin Mode first.");
       return;
     }
 
     const amount = Number(expenseAmount);
-    if (amount <= 0) {
+    if (!(amount > 0)) {
       window.alert("请输入正确的 expense 金额。");
       return;
     }
@@ -294,53 +373,70 @@ function App() {
       return;
     }
 
-    const newExpense = {
-      id: createId(),
-      type: "expense",
-      category: expenseCategory,
-      amount,
-      participantIds: [...expenseParticipantIds],
-      note: expenseNote.trim(),
-      createdAt: new Date().toISOString(),
-    };
+    const { error } = await supabase.from("records").insert([
+      {
+        group_id: activeGroup.id,
+        type: "expense",
+        category: expenseCategory,
+        amount,
+        participant_ids: expenseParticipantIds,
+        note: expenseNote.trim(),
+      },
+    ]);
 
-    updateActiveGroup((group) => ({
-      ...group,
-      expenses: [...group.expenses, newExpense],
-    }));
+    if (error) {
+      console.error(error);
+      window.alert("新增 expense 失败。");
+      return;
+    }
 
+    await loadAllData();
     setExpenseAmount("");
     setExpenseCategory("吃饭");
     setExpenseParticipantIds([]);
     setExpenseNote("");
   }
 
-  function handleDeleteDeposit(depositId) {
+  async function handleDeleteRecord(recordId) {
     if (!isAdminMode) {
       window.alert("Only Admin Mode can delete records.");
       return;
     }
 
-    if (!window.confirm("确定删除这笔 deposit 吗？")) return;
+    const confirmed = window.confirm("确定删除这条记录吗？");
+    if (!confirmed) return;
 
-    updateActiveGroup((group) => ({
-      ...group,
-      deposits: group.deposits.filter((deposit) => deposit.id !== depositId),
-    }));
+    const { error } = await supabase.from("records").delete().eq("id", recordId);
+
+    if (error) {
+      console.error(error);
+      window.alert("删除记录失败。");
+      return;
+    }
+
+    await loadAllData();
   }
 
-  function handleDeleteExpense(expenseId) {
-    if (!isAdminMode) {
-      window.alert("Only Admin Mode can delete records.");
+  async function handleDeleteGroup(groupId) {
+    if (!activeGroup || !isAdminMode || activeGroup.id !== groupId) {
+      window.alert("Open this group and enter Admin Mode before deleting it.");
       return;
     }
 
-    if (!window.confirm("确定删除这笔 expense 吗？")) return;
+    const confirmed = window.confirm("确定删除这个 group 吗？");
+    if (!confirmed) return;
 
-    updateActiveGroup((group) => ({
-      ...group,
-      expenses: group.expenses.filter((expense) => expense.id !== expenseId),
-    }));
+    const { error } = await supabase.from("groups").delete().eq("id", groupId);
+
+    if (error) {
+      console.error(error);
+      window.alert("删除 group 失败。");
+      return;
+    }
+
+    await loadAllData();
+    setActiveGroupId(null);
+    setSelectedPersonId(null);
   }
 
   const personBalances = useMemo(() => {
@@ -353,17 +449,18 @@ function App() {
     }
 
     for (const deposit of deposits) {
-      depositMap[deposit.personId] =
-        (depositMap[deposit.personId] || 0) + Number(deposit.amount || 0);
+      const personId = deposit.personId;
+      if (!personId) continue;
+      depositMap[personId] = (depositMap[personId] || 0) + Number(deposit.amount || 0);
     }
 
     for (const expense of expenses) {
-      const participants = expense.participantIds || [];
-      if (participants.length === 0) continue;
+      const participantIds = expense.participantIds || [];
+      if (participantIds.length === 0) continue;
 
-      const split = Number(expense.amount || 0) / participants.length;
-      for (const participantId of participants) {
-        expenseMap[participantId] = (expenseMap[participantId] || 0) + split;
+      const share = Number(expense.amount || 0) / participantIds.length;
+      for (const participantId of participantIds) {
+        expenseMap[participantId] = (expenseMap[participantId] || 0) + share;
       }
     }
 
@@ -383,27 +480,30 @@ function App() {
   const selectedPersonRecords = useMemo(() => {
     if (!selectedPerson) return [];
 
-    const personDeposits = deposits
+    const depositRecords = deposits
       .filter((deposit) => deposit.personId === selectedPerson.id)
       .map((deposit) => ({
         id: deposit.id,
-        createdAt: deposit.createdAt,
+        createdAt: deposit.created_at,
         displayType: "Deposit",
         amount: Number(deposit.amount || 0),
         detail: `${selectedPerson.name} 转入`,
       }));
 
-    const personExpenses = expenses
+    const expenseRecords = expenses
       .filter((expense) => (expense.participantIds || []).includes(selectedPerson.id))
       .map((expense) => ({
         id: expense.id,
-        createdAt: expense.createdAt,
+        createdAt: expense.created_at,
         displayType: "Expense",
-        amount: Number(expense.amount || 0) / expense.participantIds.length,
+        amount:
+          (expense.participantIds || []).length > 0
+            ? Number(expense.amount || 0) / expense.participantIds.length
+            : 0,
         detail: `${expense.category}${expense.note ? ` · ${expense.note}` : ""}`,
       }));
 
-    return [...personDeposits, ...personExpenses].sort(
+    return [...depositRecords, ...expenseRecords].sort(
       (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
     );
   }, [selectedPerson, deposits, expenses]);
@@ -423,9 +523,10 @@ function App() {
   const allRecords = useMemo(() => {
     const depositRecords = deposits.map((deposit) => {
       const person = people.find((item) => item.id === deposit.personId);
+
       return {
         id: deposit.id,
-        createdAt: deposit.createdAt,
+        createdAt: deposit.created_at,
         type: "Deposit",
         category: "-",
         totalAmount: Number(deposit.amount || 0),
@@ -435,25 +536,21 @@ function App() {
       };
     });
 
-    const expenseRecords = expenses.map((expense) => {
-      const participantNames = (expense.participantIds || [])
+    const expenseRecords = expenses.map((expense) => ({
+      id: expense.id,
+      createdAt: expense.created_at,
+      type: "Expense",
+      category: expense.category,
+      totalAmount: Number(expense.amount || 0),
+      perPersonAmount:
+        (expense.participantIds || []).length > 0
+          ? Number(expense.amount || 0) / expense.participantIds.length
+          : 0,
+      participants: (expense.participantIds || [])
         .map((id) => people.find((person) => person.id === id)?.name)
-        .filter(Boolean);
-
-      return {
-        id: expense.id,
-        createdAt: expense.createdAt,
-        type: "Expense",
-        category: expense.category,
-        totalAmount: Number(expense.amount || 0),
-        perPersonAmount:
-          (expense.participantIds || []).length > 0
-            ? Number(expense.amount || 0) / expense.participantIds.length
-            : 0,
-        participants: participantNames,
-        note: expense.note || "",
-      };
-    });
+        .filter(Boolean),
+      note: expense.note || "",
+    }));
 
     return [...depositRecords, ...expenseRecords].sort(
       (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
@@ -497,12 +594,25 @@ function App() {
     const blob = new Blob([csvContent], {
       type: "text/csv;charset=utf-8;",
     });
+
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `${(activeGroup.name || "group").replace(/\s+/g, "_")}_records.csv`;
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  if (loading) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.wrapper}>
+          <section style={styles.card}>
+            <h2 style={styles.cardTitle}>Loading...</h2>
+          </section>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -515,8 +625,13 @@ function App() {
             <div>
               <h1 style={styles.title}>Shared Trip Wallet</h1>
               <p style={styles.subtitle}>
-                Mobile-friendly local version. Realtime comes next.
+                Supabase version — shared across devices and people.
               </p>
+              {errorMessage ? (
+                <p style={{ ...styles.subtitle, color: "#b91c1c" }}>
+                  {errorMessage}
+                </p>
+              ) : null}
             </div>
 
             {activeGroup ? (
@@ -608,7 +723,7 @@ function App() {
                         <div>
                           <div style={styles.savedGroupName}>{group.name}</div>
                           <div style={styles.savedGroupMeta}>
-                            {group.people.length} people
+                            {group.people?.length || 0} people
                           </div>
                         </div>
 
@@ -625,15 +740,7 @@ function App() {
                               opacity: canDeleteThisGroup ? 1 : 0.5,
                               cursor: canDeleteThisGroup ? "pointer" : "not-allowed",
                             }}
-                            onClick={() => {
-                              if (!canDeleteThisGroup) {
-                                window.alert(
-                                  "Open this group and enter Admin Mode before deleting it."
-                                );
-                                return;
-                              }
-                              handleDeleteGroup(group.id);
-                            }}
+                            onClick={() => handleDeleteGroup(group.id)}
                           >
                             Delete
                           </button>
@@ -1053,11 +1160,7 @@ function App() {
                               {isAdminMode ? (
                                 <button
                                   style={styles.deleteTextButton}
-                                  onClick={() =>
-                                    record.type === "Deposit"
-                                      ? handleDeleteDeposit(record.id)
-                                      : handleDeleteExpense(record.id)
-                                  }
+                                  onClick={() => handleDeleteRecord(record.id)}
                                 >
                                   Delete
                                 </button>
@@ -1086,79 +1189,6 @@ function App() {
       </div>
     </>
   );
-}
-
-function createId() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function normalizeGroups(rawGroups) {
-  if (!Array.isArray(rawGroups)) return [];
-  return rawGroups.map(normalizeGroup).filter(Boolean);
-}
-
-function normalizeGroup(group) {
-  if (!group || typeof group !== "object") return null;
-
-  const normalizedPeople = Array.isArray(group.people)
-    ? group.people.map((person, index) => ({
-        id: person?.id || createId(),
-        name: person?.name || `Person ${index + 1}`,
-      }))
-    : [];
-
-  const validPersonIds = new Set(normalizedPeople.map((person) => person.id));
-
-  const normalizedDeposits = Array.isArray(group.deposits)
-    ? group.deposits
-        .map((deposit) => ({
-          id: deposit?.id || createId(),
-          type: "deposit",
-          personId: validPersonIds.has(deposit?.personId) ? deposit.personId : null,
-          amount: Number(deposit?.amount || 0),
-          createdAt: deposit?.createdAt || new Date().toISOString(),
-        }))
-        .filter((deposit) => deposit.personId && deposit.amount >= 0)
-    : [];
-
-  const normalizedExpenses = Array.isArray(group.expenses)
-    ? group.expenses
-        .map((expense) => {
-          const participantIds = Array.isArray(expense?.participantIds)
-            ? expense.participantIds.filter((id) => validPersonIds.has(id))
-            : [];
-
-          return {
-            id: expense?.id || createId(),
-            type: "expense",
-            category: CATEGORY_OPTIONS.includes(expense?.category)
-              ? expense.category
-              : "其他",
-            amount: Number(expense?.amount || 0),
-            participantIds,
-            note: expense?.note || "",
-            createdAt: expense?.createdAt || new Date().toISOString(),
-          };
-        })
-        .filter(
-          (expense) =>
-            expense.participantIds.length > 0 && Number.isFinite(expense.amount)
-        )
-    : [];
-
-  return {
-    id: group.id || createId(),
-    name: group.name || "Untitled Group",
-    adminPassword: group.adminPassword || "",
-    isAdminMode: Boolean(group.isAdminMode),
-    people: normalizedPeople,
-    deposits: normalizedDeposits,
-    expenses: normalizedExpenses,
-    createdAt: group.createdAt || new Date().toISOString(),
-  };
 }
 
 function formatCurrency(value) {
