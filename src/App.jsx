@@ -23,10 +23,11 @@ function App() {
   const [groupName, setGroupName] = useState("");
   const [groupSize, setGroupSize] = useState(9);
   const [nameInputs, setNameInputs] = useState(Array(9).fill(""));
+  const [viewPassword, setViewPassword] = useState("");
   const [groupPassword, setGroupPassword] = useState("");
 
   const [adminPasswordInput, setAdminPasswordInput] = useState("");
-  const [openPasswordInput, setOpenPasswordInput] = useState("");
+  const [openPasswordInputs, setOpenPasswordInputs] = useState({});
   const [unlockedGroupIds, setUnlockedGroupIds] = useState([]);
 
   const [depositAmount, setDepositAmount] = useState("");
@@ -138,9 +139,7 @@ function App() {
 
     setActiveGroupId((prev) => {
       if (!groupRows || groupRows.length === 0) return null;
-      return groupRows.some((group) => group.id === prev)
-        ? prev
-        : null;
+      return groupRows.some((group) => group.id === prev) ? prev : null;
     });
 
     setUnlockedGroupIds((prev) =>
@@ -196,6 +195,7 @@ function App() {
     setGroupName("");
     setGroupSize(9);
     setNameInputs(Array(9).fill(""));
+    setViewPassword("");
     setGroupPassword("");
   }
 
@@ -219,13 +219,21 @@ function App() {
     });
   }
 
+  function handleOpenPasswordChange(groupId, value) {
+    setOpenPasswordInputs((prev) => ({
+      ...prev,
+      [groupId]: value,
+    }));
+  }
+
   function handleOpenGroup(groupId) {
     const targetGroup = groups.find((group) => group.id === groupId);
     if (!targetGroup) return;
 
-    const requiredPassword = targetGroup.admin_password || "";
+    const requiredPassword = targetGroup.view_password || "";
+    const inputPassword = openPasswordInputs[groupId] || "";
 
-    if (requiredPassword && openPasswordInput !== requiredPassword) {
+    if ((requiredPassword || "") !== inputPassword) {
       window.alert("打开 group 的密码不对。");
       return;
     }
@@ -236,7 +244,6 @@ function App() {
     );
     setSelectedPersonId(targetGroup.people?.[0]?.id || null);
     setAdminPasswordInput("");
-    setOpenPasswordInput("");
     setDepositPersonIds([]);
     setExpenseParticipantIds([]);
   }
@@ -248,7 +255,6 @@ function App() {
     setActiveGroupId(null);
     setSelectedPersonId(null);
     setAdminPasswordInput("");
-    setOpenPasswordInput("");
   }
 
   async function handleCreateGroup() {
@@ -264,6 +270,7 @@ function App() {
       .insert([
         {
           name: groupName.trim() || `Trip ${groups.length + 1}`,
+          view_password: viewPassword.trim(),
           admin_password: groupPassword.trim(),
         },
       ])
@@ -291,7 +298,6 @@ function App() {
 
     resetCreateForm();
     setAdminPasswordInput("");
-    setOpenPasswordInput("");
     setDepositAmount("");
     setExpenseAmount("");
     setExpenseNote("");
@@ -318,7 +324,7 @@ function App() {
       );
       setAdminPasswordInput("");
     } else {
-      window.alert("密码不对。");
+      window.alert("管理员密码不对。");
     }
   }
 
@@ -749,13 +755,22 @@ function App() {
                 onChange={(event) => handleGroupSizeChange(event.target.value)}
               />
 
-              <label style={styles.label}>Group password</label>
+              <label style={styles.label}>View password</label>
+              <input
+                style={styles.input}
+                type="password"
+                value={viewPassword}
+                onChange={(event) => setViewPassword(event.target.value)}
+                placeholder="Open group 时使用"
+              />
+
+              <label style={styles.label}>Admin password</label>
               <input
                 style={styles.input}
                 type="password"
                 value={groupPassword}
                 onChange={(event) => setGroupPassword(event.target.value)}
-                placeholder="打开和管理员先共用这个密码"
+                placeholder="进入 Admin Mode 时使用"
               />
 
               <div style={{ marginTop: 12 }}>
@@ -812,16 +827,11 @@ function App() {
                             <input
                               style={styles.input}
                               type="password"
-                              value={group.id === activeGroupId ? openPasswordInput : ""}
-                              onChange={(event) => {
-                                if (group.id === activeGroupId) {
-                                  setOpenPasswordInput(event.target.value);
-                                } else {
-                                  setActiveGroupId(group.id);
-                                  setOpenPasswordInput(event.target.value);
-                                }
-                              }}
-                              placeholder="Enter group password to open"
+                              value={openPasswordInputs[group.id] || ""}
+                              onChange={(event) =>
+                                handleOpenPasswordChange(group.id, event.target.value)
+                              }
+                              placeholder="Enter view password to open"
                             />
                           </div>
                         </div>
@@ -854,7 +864,7 @@ function App() {
 
           {!activeGroup ? (
             <section style={styles.card}>
-              <p style={styles.emptyText}>Enter the group password and click Open.</p>
+              <p style={styles.emptyText}>Enter the view password and click Open.</p>
             </section>
           ) : (
             <>
@@ -863,7 +873,7 @@ function App() {
                   <div>
                     <h2 style={styles.cardTitle}>{activeGroup.name}</h2>
                     <p style={styles.sectionSubtitle}>
-                      Viewing requires password. Only Admin Mode can edit.
+                      Viewing requires view password. Only Admin Mode can edit.
                     </p>
                   </div>
 
