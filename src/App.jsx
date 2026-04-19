@@ -26,6 +26,8 @@ function App() {
   const [groupPassword, setGroupPassword] = useState("");
 
   const [adminPasswordInput, setAdminPasswordInput] = useState("");
+  const [openPasswordInput, setOpenPasswordInput] = useState("");
+  const [unlockedGroupIds, setUnlockedGroupIds] = useState([]);
 
   const [depositAmount, setDepositAmount] = useState("");
   const [depositPersonIds, setDepositPersonIds] = useState([]);
@@ -35,8 +37,14 @@ function App() {
   const [expenseParticipantIds, setExpenseParticipantIds] = useState([]);
   const [expenseNote, setExpenseNote] = useState("");
 
-  const activeGroup =
+  const rawActiveGroup =
     groups.find((group) => group.id === activeGroupId) || null;
+
+  const isUnlocked = rawActiveGroup
+    ? unlockedGroupIds.includes(rawActiveGroup.id)
+    : false;
+
+  const activeGroup = rawActiveGroup && isUnlocked ? rawActiveGroup : null;
 
   const people = activeGroup?.people || [];
   const deposits = activeGroup?.deposits || [];
@@ -132,8 +140,12 @@ function App() {
       if (!groupRows || groupRows.length === 0) return null;
       return groupRows.some((group) => group.id === prev)
         ? prev
-        : groupRows[0].id;
+        : null;
     });
+
+    setUnlockedGroupIds((prev) =>
+      prev.filter((id) => groupRows?.some((group) => group.id === id))
+    );
 
     setLoading(false);
   }, []);
@@ -211,11 +223,32 @@ function App() {
     const targetGroup = groups.find((group) => group.id === groupId);
     if (!targetGroup) return;
 
+    const requiredPassword = targetGroup.admin_password || "";
+
+    if (requiredPassword && openPasswordInput !== requiredPassword) {
+      window.alert("打开 group 的密码不对。");
+      return;
+    }
+
     setActiveGroupId(groupId);
+    setUnlockedGroupIds((prev) =>
+      prev.includes(groupId) ? prev : [...prev, groupId]
+    );
     setSelectedPersonId(targetGroup.people?.[0]?.id || null);
     setAdminPasswordInput("");
+    setOpenPasswordInput("");
     setDepositPersonIds([]);
     setExpenseParticipantIds([]);
+  }
+
+  function handleCloseGroupView() {
+    if (!rawActiveGroup) return;
+
+    setUnlockedGroupIds((prev) => prev.filter((id) => id !== rawActiveGroup.id));
+    setActiveGroupId(null);
+    setSelectedPersonId(null);
+    setAdminPasswordInput("");
+    setOpenPasswordInput("");
   }
 
   async function handleCreateGroup() {
@@ -258,6 +291,7 @@ function App() {
 
     resetCreateForm();
     setAdminPasswordInput("");
+    setOpenPasswordInput("");
     setDepositAmount("");
     setExpenseAmount("");
     setExpenseNote("");
@@ -266,6 +300,9 @@ function App() {
 
     await loadAllData();
     setActiveGroupId(createdGroup.id);
+    setUnlockedGroupIds((prev) =>
+      prev.includes(createdGroup.id) ? prev : [...prev, createdGroup.id]
+    );
   }
 
   function handleEnterAdminMode() {
@@ -435,6 +472,7 @@ function App() {
     }
 
     await loadAllData();
+    setUnlockedGroupIds((prev) => prev.filter((id) => id !== groupId));
     setActiveGroupId(null);
     setSelectedPersonId(null);
   }
@@ -603,6 +641,50 @@ function App() {
     URL.revokeObjectURL(url);
   }
 
+  function exportSelectedPersonCsv() {
+    if (!activeGroup || !selectedPerson) return;
+
+    const rows = [
+      [
+        "group_name",
+        "person_name",
+        "timestamp",
+        "type",
+        "detail",
+        "amount_rmb",
+      ],
+      ...selectedPersonRecords.map((record) => [
+        activeGroup.name,
+        selectedPerson.name,
+        formatDate(record.createdAt),
+        record.displayType,
+        record.detail,
+        Number(record.amount || 0).toFixed(2),
+      ]),
+    ];
+
+    const csvContent = rows
+      .map((row) =>
+        row
+          .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
+          .join(",")
+      )
+      .join("\n");
+
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(activeGroup.name || "group").replace(/\s+/g, "_")}_${(
+      selectedPerson.name || "person"
+    ).replace(/\s+/g, "_")}_records.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   if (loading) {
     return (
       <div style={styles.page}>
@@ -667,13 +749,13 @@ function App() {
                 onChange={(event) => handleGroupSizeChange(event.target.value)}
               />
 
-              <label style={styles.label}>Admin password</label>
+              <label style={styles.label}>Group password</label>
               <input
                 style={styles.input}
                 type="password"
                 value={groupPassword}
                 onChange={(event) => setGroupPassword(event.target.value)}
-                placeholder="每个 group 单独设置"
+                placeholder="打开和管理员先共用这个密码"
               />
 
               <div style={{ marginTop: 12 }}>
@@ -720,10 +802,27 @@ function App() {
                               : "1px solid #e5e7eb",
                         }}
                       >
-                        <div>
+                        <div style={{ flex: 1, minWidth: 200 }}>
                           <div style={styles.savedGroupName}>{group.name}</div>
                           <div style={styles.savedGroupMeta}>
                             {group.people?.length || 0} people
+                          </div>
+
+                          <div style={{ marginTop: 10 }}>
+                            <input
+                              style={styles.input}
+                              type="password"
+                              value={group.id === activeGroupId ? openPasswordInput : ""}
+                              onChange={(event) => {
+                                if (group.id === activeGroupId) {
+                                  setOpenPasswordInput(event.target.value);
+                                } else {
+                                  setActiveGroupId(group.id);
+                                  setOpenPasswordInput(event.target.value);
+                                }
+                              }}
+                              placeholder="Enter group password to open"
+                            />
                           </div>
                         </div>
 
@@ -755,7 +854,7 @@ function App() {
 
           {!activeGroup ? (
             <section style={styles.card}>
-              <p style={styles.emptyText}>Create or open a group to continue.</p>
+              <p style={styles.emptyText}>Enter the group password and click Open.</p>
             </section>
           ) : (
             <>
@@ -764,11 +863,18 @@ function App() {
                   <div>
                     <h2 style={styles.cardTitle}>{activeGroup.name}</h2>
                     <p style={styles.sectionSubtitle}>
-                      Everyone can view. Only Admin Mode can edit.
+                      Viewing requires password. Only Admin Mode can edit.
                     </p>
                   </div>
 
                   <div className="admin-controls" style={styles.adminControls}>
+                    <button
+                      style={styles.secondaryButton}
+                      onClick={handleCloseGroupView}
+                    >
+                      Close Group
+                    </button>
+
                     {isAdminMode ? (
                       <button
                         style={styles.secondaryButton}
@@ -1012,7 +1118,16 @@ function App() {
                 </section>
 
                 <section style={styles.card}>
-                  <h2 style={styles.cardTitle}>Selected Person Details</h2>
+                  <div style={styles.sectionHeaderRow}>
+                    <h2 style={styles.cardTitle}>Selected Person Details</h2>
+                    <button
+                      style={styles.secondaryButton}
+                      onClick={exportSelectedPersonCsv}
+                      disabled={!selectedPerson}
+                    >
+                      Export Person CSV
+                    </button>
+                  </div>
 
                   {!selectedPerson ? (
                     <p style={styles.emptyText}>Select a person to view details.</p>
