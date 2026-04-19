@@ -529,9 +529,11 @@ function App() {
       .map((deposit) => ({
         id: deposit.id,
         createdAt: deposit.created_at,
+        timestamp: new Date(deposit.created_at).getTime(),
         displayType: "Deposit",
         amount: Number(deposit.amount || 0),
         detail: `${selectedPerson.name} 转入`,
+        delta: Number(deposit.amount || 0),
       }));
 
     const expenseRecords = expenses
@@ -539,17 +541,34 @@ function App() {
       .map((expense) => ({
         id: expense.id,
         createdAt: expense.created_at,
+        timestamp: new Date(expense.created_at).getTime(),
         displayType: "Expense",
         amount:
           (expense.participantIds || []).length > 0
             ? Number(expense.amount || 0) / expense.participantIds.length
             : 0,
         detail: `${expense.category}${expense.note ? ` · ${expense.note}` : ""}`,
+        delta:
+          (expense.participantIds || []).length > 0
+            ? -Number(expense.amount || 0) / expense.participantIds.length
+            : 0,
       }));
 
-    return [...depositRecords, ...expenseRecords].sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+    const chronological = [...depositRecords, ...expenseRecords].sort(
+      (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
     );
+
+    let runningBalance = 0;
+
+    const withBalance = chronological.map((record) => {
+      runningBalance += Number(record.delta || 0);
+      return {
+        ...record,
+        runningBalance,
+      };
+    });
+
+    return withBalance.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }, [selectedPerson, deposits, expenses]);
 
   const pieData = useMemo(() => {
@@ -650,6 +669,10 @@ function App() {
   function exportSelectedPersonCsv() {
     if (!activeGroup || !selectedPerson) return;
 
+    const chronologicalRecords = [...selectedPersonRecords].sort(
+      (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
+    );
+
     const rows = [
       [
         "group_name",
@@ -658,14 +681,16 @@ function App() {
         "type",
         "detail",
         "amount_rmb",
+        "balance_after_record",
       ],
-      ...selectedPersonRecords.map((record) => [
+      ...chronologicalRecords.map((record) => [
         activeGroup.name,
         selectedPerson.name,
         formatDate(record.createdAt),
         record.displayType,
         record.detail,
         Number(record.amount || 0).toFixed(2),
+        Number(record.runningBalance || 0).toFixed(2),
       ]),
     ];
 
@@ -1173,6 +1198,10 @@ function App() {
                                 <div style={styles.detailDate}>
                                   {formatDate(record.createdAt)}
                                 </div>
+                                <div style={styles.detailBalance}>
+                                  Balance after record:{" "}
+                                  {formatCurrency(record.runningBalance)}
+                                </div>
                               </div>
                               <div style={styles.detailAmount}>
                                 {formatCurrency(record.amount)}
@@ -1631,6 +1660,12 @@ const styles = {
     color: "#9ca3af",
     fontSize: 12,
     marginTop: 4,
+  },
+  detailBalance: {
+    color: "#6b7280",
+    fontSize: 12,
+    marginTop: 6,
+    fontWeight: 600,
   },
   detailAmount: {
     fontWeight: 800,
