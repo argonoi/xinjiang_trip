@@ -595,6 +595,7 @@ function App() {
         totalAmount: Number(deposit.amount || 0),
         perPersonAmount: Number(deposit.amount || 0),
         participants: person ? [person.name] : [],
+        participantIds: person ? [person.id] : [],
         note: "",
       };
     });
@@ -612,6 +613,7 @@ function App() {
       participants: (expense.participantIds || [])
         .map((id) => people.find((person) => person.id === id)?.name)
         .filter(Boolean),
+      participantIds: expense.participantIds || [],
       note: expense.note || "",
     }));
 
@@ -620,8 +622,33 @@ function App() {
     );
   }, [deposits, expenses, people]);
 
+  function escapeCsvCell(value) {
+    return `"${String(value ?? "").replaceAll('"', '""')}"`;
+  }
+
+  function downloadCsv(filename, rows) {
+    const csvContent = rows
+      .map((row) => row.map((cell) => escapeCsvCell(cell)).join(","))
+      .join("\r\n");
+
+    const blob = new Blob(["\uFEFF", csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   function exportCsv() {
     if (!activeGroup) return;
+
+    const participantColumns = people.map((person) => person.name);
 
     const rows = [
       [
@@ -632,38 +659,30 @@ function App() {
         "total_amount_rmb",
         "per_person_amount_rmb",
         "participants",
+        ...participantColumns,
         "note",
       ],
-      ...allRecords.map((record) => [
-        activeGroup.name,
-        formatDate(record.createdAt),
-        record.type,
-        record.category,
-        record.totalAmount.toFixed(2),
-        record.perPersonAmount.toFixed(2),
-        record.participants.join(" | "),
-        record.note,
-      ]),
+      ...allRecords.map((record) => {
+        const participantSet = new Set(record.participantIds || []);
+
+        return [
+          activeGroup.name,
+          formatDate(record.createdAt),
+          record.type,
+          record.category,
+          record.totalAmount.toFixed(2),
+          record.perPersonAmount.toFixed(2),
+          record.participants.join(" | "),
+          ...people.map((person) => (participantSet.has(person.id) ? 1 : 0)),
+          record.note,
+        ];
+      }),
     ];
 
-    const csvContent = rows
-      .map((row) =>
-        row
-          .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
-          .join(",")
-      )
-      .join("\n");
-
-    const blob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
-    });
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${(activeGroup.name || "group").replace(/\s+/g, "_")}_records.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(
+      `${(activeGroup.name || "group").replace(/\s+/g, "_")}_records.csv`,
+      rows
+    );
   }
 
   function exportSelectedPersonCsv() {
@@ -694,26 +713,12 @@ function App() {
       ]),
     ];
 
-    const csvContent = rows
-      .map((row) =>
-        row
-          .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
-          .join(",")
-      )
-      .join("\n");
-
-    const blob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
-    });
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${(activeGroup.name || "group").replace(/\s+/g, "_")}_${(
-      selectedPerson.name || "person"
-    ).replace(/\s+/g, "_")}_records.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(
+      `${(activeGroup.name || "group").replace(/\s+/g, "_")}_${(
+        selectedPerson.name || "person"
+      ).replace(/\s+/g, "_")}_records.csv`,
+      rows
+    );
   }
 
   if (loading) {
