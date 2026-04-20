@@ -38,6 +38,12 @@ function App() {
   const [expenseParticipantIds, setExpenseParticipantIds] = useState([]);
   const [expenseNote, setExpenseNote] = useState("");
 
+  const [oldViewPassword, setOldViewPassword] = useState("");
+  const [newViewPassword, setNewViewPassword] = useState("");
+  const [oldAdminPassword, setOldAdminPassword] = useState("");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+
   const rawActiveGroup =
     groups.find((group) => group.id === activeGroupId) || null;
 
@@ -57,7 +63,7 @@ function App() {
 
     const { data: groupRows, error: groupsError } = await supabase
       .from("groups")
-      .select("*")
+      .select("id, name, created_at")
       .order("created_at", { ascending: false });
 
     if (groupsError) {
@@ -199,6 +205,13 @@ function App() {
     setGroupPassword("");
   }
 
+  function resetPasswordChangeForm() {
+    setOldViewPassword("");
+    setNewViewPassword("");
+    setOldAdminPassword("");
+    setNewAdminPassword("");
+  }
+
   function handleGroupSizeChange(value) {
     const size = Math.max(1, Number(value) || 1);
     setGroupSize(size);
@@ -226,14 +239,25 @@ function App() {
     }));
   }
 
-  function handleOpenGroup(groupId) {
+  async function handleOpenGroup(groupId) {
     const targetGroup = groups.find((group) => group.id === groupId);
     if (!targetGroup) return;
 
-    const requiredPassword = targetGroup.view_password || "";
     const inputPassword = openPasswordInputs[groupId] || "";
 
-    if ((requiredPassword || "") !== inputPassword) {
+    const { data, error } = await supabase.rpc("verify_group_password", {
+      p_group_id: groupId,
+      p_password: inputPassword,
+      p_mode: "view",
+    });
+
+    if (error) {
+      console.error(error);
+      window.alert("验证密码失败。请先确认 SQL function 已创建。\n\n如果这是新建 group，也请先确认你已经创建了 sync_group_password_hashes function。\n\n" + error.message);
+      return;
+    }
+
+    if (!data) {
       window.alert("打开 group 的密码不对。");
       return;
     }
@@ -246,6 +270,7 @@ function App() {
     setAdminPasswordInput("");
     setDepositPersonIds([]);
     setExpenseParticipantIds([]);
+    resetPasswordChangeForm();
   }
 
   function handleCloseGroupView() {
@@ -255,6 +280,7 @@ function App() {
     setActiveGroupId(null);
     setSelectedPersonId(null);
     setAdminPasswordInput("");
+    resetPasswordChangeForm();
   }
 
   async function handleCreateGroup() {
@@ -274,12 +300,22 @@ function App() {
           admin_password: groupPassword.trim(),
         },
       ])
-      .select()
+      .select("id, name, created_at")
       .single();
 
     if (groupError) {
       console.error(groupError);
       window.alert("创建 group 失败。");
+      return;
+    }
+
+    const { error: syncError } = await supabase.rpc("sync_group_password_hashes", {
+      p_group_id: createdGroup.id,
+    });
+
+    if (syncError) {
+      console.error(syncError);
+      window.alert("group 已创建，但密码哈希同步失败。请先创建 sync_group_password_hashes SQL function。\n\n" + syncError.message);
       return;
     }
 
@@ -297,6 +333,7 @@ function App() {
     }
 
     resetCreateForm();
+    resetPasswordChangeForm();
     setAdminPasswordInput("");
     setDepositAmount("");
     setExpenseAmount("");
@@ -311,10 +348,22 @@ function App() {
     );
   }
 
-  function handleEnterAdminMode() {
+  async function handleEnterAdminMode() {
     if (!activeGroup) return;
 
-    if ((activeGroup.admin_password || "") === adminPasswordInput) {
+    const { data, error } = await supabase.rpc("verify_group_password", {
+      p_group_id: activeGroup.id,
+      p_password: adminPasswordInput,
+      p_mode: "admin",
+    });
+
+    if (error) {
+      console.error(error);
+      window.alert("验证管理员密码失败。\n\n" + error.message);
+      return;
+    }
+
+    if (data) {
       setGroups((prev) =>
         prev.map((group) =>
           group.id === activeGroup.id
@@ -481,6 +530,53 @@ function App() {
     setUnlockedGroupIds((prev) => prev.filter((id) => id !== groupId));
     setActiveGroupId(null);
     setSelectedPersonId(null);
+  }
+
+  async function handleChangePassword(mode) {
+    if (!activeGroup || !isAdminMode) {
+      window.alert("Please enter Admin Mode first.");
+      return;
+    }
+
+    const oldPassword = mode === "view" ? oldViewPassword : oldAdminPassword;
+    const newPassword = mode === "view" ? newViewPassword : newAdminPassword;
+
+    if (!oldPassword.trim() || !newPassword.trim()) {
+      window.alert("旧密码和新密码都要填写。\n");
+      return;
+    }
+
+    setChangingPassword(true);
+
+    const { data, error } = await supabase.rpc("change_group_password", {
+      p_group_id: activeGroup.id,
+      p_old_password: oldPassword,
+      p_new_password: newPassword,
+      p_mode: mode,
+    });
+
+    setChangingPassword(false);
+
+    if (error) {
+      console.error(error);
+      window.alert("修改密码失败。请先创建 change_group_password SQL function。\n\n" + error.message);
+      return;
+    }
+
+    if (!data) {
+      window.alert("旧密码不对。");
+      return;
+    }
+
+    if (mode === "view") {
+      setOldViewPassword("");
+      setNewViewPassword("");
+    } else {
+      setOldAdminPassword("");
+      setNewAdminPassword("");
+    }
+
+    window.alert(mode === "view" ? "View password 修改成功。" : "Admin password 修改成功。");
   }
 
   const personBalances = useMemo(() => {
@@ -941,6 +1037,77 @@ function App() {
                         </button>
                       </>
                     )}
+                  </div>
+                </div>
+              </section>
+
+              <section style={styles.card}>
+                <h2 style={styles.cardTitle}>Change Password</h2>
+                <p style={styles.sectionSubtitle}>
+                  Only Admin Mode can change passwords.
+                </p>
+
+                <div className="form-grid" style={styles.formGrid}>
+                  <div>
+                    <label style={styles.label}>Old View Password</label>
+                    <input
+                      style={styles.input}
+                      type="password"
+                      value={oldViewPassword}
+                      onChange={(event) => setOldViewPassword(event.target.value)}
+                      disabled={!isAdminMode || changingPassword}
+                    />
+
+                    <label style={styles.label}>New View Password</label>
+                    <input
+                      style={styles.input}
+                      type="password"
+                      value={newViewPassword}
+                      onChange={(event) => setNewViewPassword(event.target.value)}
+                      disabled={!isAdminMode || changingPassword}
+                    />
+
+                    <button
+                      style={{
+                        ...styles.primaryButton,
+                        opacity: isAdminMode ? 1 : 0.6,
+                      }}
+                      onClick={() => handleChangePassword("view")}
+                      disabled={!isAdminMode || changingPassword}
+                    >
+                      Change View Password
+                    </button>
+                  </div>
+
+                  <div>
+                    <label style={styles.label}>Old Admin Password</label>
+                    <input
+                      style={styles.input}
+                      type="password"
+                      value={oldAdminPassword}
+                      onChange={(event) => setOldAdminPassword(event.target.value)}
+                      disabled={!isAdminMode || changingPassword}
+                    />
+
+                    <label style={styles.label}>New Admin Password</label>
+                    <input
+                      style={styles.input}
+                      type="password"
+                      value={newAdminPassword}
+                      onChange={(event) => setNewAdminPassword(event.target.value)}
+                      disabled={!isAdminMode || changingPassword}
+                    />
+
+                    <button
+                      style={{
+                        ...styles.primaryButton,
+                        opacity: isAdminMode ? 1 : 0.6,
+                      }}
+                      onClick={() => handleChangePassword("admin")}
+                      disabled={!isAdminMode || changingPassword}
+                    >
+                      Change Admin Password
+                    </button>
                   </div>
                 </div>
               </section>
